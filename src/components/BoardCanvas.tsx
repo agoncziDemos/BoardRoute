@@ -1,19 +1,53 @@
-import { useEffect, useRef } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import { drawBoard } from "./board/boardDrawing";
+import {
+  clampPointToBoard,
+  clampRectToBoard,
+  fromCanvas,
+  getBoardTransform,
+  resizeRectFromHandle,
+} from "./board/boardGeometry";
+import {
+  findEditablePadHit,
+  findObstacleHit,
+  findResizeHandleHit,
+  getResizeCursor,
+} from "./board/boardHitTesting";
+import type {
+  CanvasCursor,
+  DragState,
+} from "./board/boardInteractionTypes";
 import type { DemoBoard, Point, Rect, RouteResult } from "../routing/routeTypes";
 
 type BoardCanvasProps = {
   board: DemoBoard;
   route: RouteResult;
+  selectedObstacleIndex: number | null;
+  isAddingObstacle: boolean;
+  onObstacleSelect: (obstacleIndex: number | null) => void;
+  onObstacleAdd?: (center: Point) => void;
+  onPadMove?: (padId: string, center: Point) => void;
+  onObstacleMove?: (obstacleIndex: number, obstacle: Rect) => void;
 };
 
-type BoardTransform = {
-  scale: number;
-  offsetX: number;
-  offsetY: number;
-};
-
-export function BoardCanvas({ board, route }: BoardCanvasProps) {
+export function BoardCanvas({
+  board,
+  route,
+  selectedObstacleIndex,
+  isAddingObstacle,
+  onObstacleSelect,
+  onObstacleAdd,
+  onPadMove,
+  onObstacleMove,
+}: BoardCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const dragState = useRef<DragState | null>(null);
+  const [cursor, setCursor] = useState<CanvasCursor>("default");
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -36,7 +70,14 @@ export function BoardCanvas({ board, route }: BoardCanvasProps) {
       }
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      drawBoard(ctx, rect.width, rect.height, board, route);
+      drawBoard(
+        ctx,
+        rect.width,
+        rect.height,
+        board,
+        route,
+        selectedObstacleIndex,
+      );
     };
 
     draw();
@@ -45,252 +86,224 @@ export function BoardCanvas({ board, route }: BoardCanvasProps) {
     observer.observe(canvas);
 
     return () => observer.disconnect();
-  }, [board, route]);
+  }, [board, route, selectedObstacleIndex]);
 
-  return <canvas ref={canvasRef} className="boardCanvas" />;
-}
+  const getBoardPoint = (
+    event: ReactPointerEvent<HTMLCanvasElement>,
+  ): Point | null => {
+    const canvas = canvasRef.current;
 
-function drawBoard(
-  ctx: CanvasRenderingContext2D,
-  canvasWidth: number,
-  canvasHeight: number,
-  board: DemoBoard,
-  route: RouteResult,
-) {
-  ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+    if (canvas === null) {
+      return null;
+    }
 
-  const transform = getBoardTransform(canvasWidth, canvasHeight, board);
+    const rect = canvas.getBoundingClientRect();
+    const canvasPoint = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
+    const transform = getBoardTransform(rect.width, rect.height, board);
 
-  drawBackground(ctx, canvasWidth, canvasHeight);
-  drawBoardFill(ctx, board, transform);
-  drawGrid(ctx, board, transform, 10);
-  drawExpandedObstacles(ctx, board.expandedObstacles, transform);
-  drawObstacles(ctx, board.obstacles, transform);
-  drawPads(ctx, board, transform);
-  drawRoute(ctx, route.points, transform);
-  drawBoardOutline(ctx, board, transform);
-}
-
-function getBoardTransform(
-  canvasWidth: number,
-  canvasHeight: number,
-  board: DemoBoard,
-): BoardTransform {
-  const margin = 32;
-  const scale = Math.min(
-    (canvasWidth - 2 * margin) / board.width,
-    (canvasHeight - 2 * margin) / board.height,
-  );
-
-  return {
-    scale,
-    offsetX: (canvasWidth - board.width * scale) / 2,
-    offsetY: (canvasHeight - board.height * scale) / 2,
+    return fromCanvas(canvasPoint, transform);
   };
-}
 
-function toCanvas(point: Point, transform: BoardTransform): Point {
-  return {
-    x: transform.offsetX + point.x * transform.scale,
-    y: transform.offsetY + point.y * transform.scale,
+  const handlePointerDown = (
+    event: ReactPointerEvent<HTMLCanvasElement>,
+  ) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    const boardPoint = getBoardPoint(event);
+
+    if (boardPoint === null) {
+      return;
+    }
+
+    if (isAddingObstacle) {
+      onObstacleAdd?.(boardPoint);
+      event.preventDefault();
+
+      return;
+    }
+
+    const hitResizeHandle = findResizeHandleHit(
+      board,
+      boardPoint,
+      selectedObstacleIndex,
+    );
+
+    if (
+      hitResizeHandle !== null &&
+      selectedObstacleIndex !== null &&
+      board.obstacles[selectedObstacleIndex] !== undefined
+    ) {
+      dragState.current = {
+        kind: "resize",
+        obstacleIndex: selectedObstacleIndex,
+        handle: hitResizeHandle,
+        startPoint: boardPoint,
+        startRect: board.obstacles[selectedObstacleIndex],
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setCursor(getResizeCursor(hitResizeHandle));
+      event.preventDefault();
+
+      return;
+    }
+
+    const hitPadId = findEditablePadHit(board, boardPoint);
+
+    if (hitPadId !== null) {
+      dragState.current = {
+        kind: "pad",
+        padId: hitPadId,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setCursor("grabbing");
+      event.preventDefault();
+
+      return;
+    }
+
+    const hitObstacleIndex = findObstacleHit(board, boardPoint);
+
+    if (hitObstacleIndex !== null) {
+      onObstacleSelect(hitObstacleIndex);
+      dragState.current = {
+        kind: "obstacle",
+        obstacleIndex: hitObstacleIndex,
+        startPoint: boardPoint,
+        startRect: board.obstacles[hitObstacleIndex],
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setCursor("grabbing");
+      event.preventDefault();
+
+      return;
+    }
+
+    onObstacleSelect(null);
   };
-}
 
-function rectToCanvas(rect: Rect, transform: BoardTransform): Rect {
-  return {
-    x: transform.offsetX + rect.x * transform.scale,
-    y: transform.offsetY + rect.y * transform.scale,
-    width: rect.width * transform.scale,
-    height: rect.height * transform.scale,
+  const handlePointerMove = (
+    event: ReactPointerEvent<HTMLCanvasElement>,
+  ) => {
+    const boardPoint = getBoardPoint(event);
+
+    if (boardPoint === null) {
+      return;
+    }
+
+    if (isAddingObstacle) {
+      setCursor("crosshair");
+
+      return;
+    }
+
+    const activeDrag = dragState.current;
+
+    if (activeDrag?.kind === "pad") {
+      const pad = board.pads.find((candidate) => {
+        return candidate.id === activeDrag.padId;
+      });
+
+      if (pad === undefined) {
+        return;
+      }
+
+      onPadMove?.(
+        activeDrag.padId,
+        clampPointToBoard(boardPoint, board, pad.radius),
+      );
+      event.preventDefault();
+
+      return;
+    }
+
+    if (activeDrag?.kind === "obstacle") {
+      const delta = {
+        x: boardPoint.x - activeDrag.startPoint.x,
+        y: boardPoint.y - activeDrag.startPoint.y,
+      };
+      const nextRect = clampRectToBoard(
+        {
+          ...activeDrag.startRect,
+          x: activeDrag.startRect.x + delta.x,
+          y: activeDrag.startRect.y + delta.y,
+        },
+        board,
+      );
+
+      onObstacleMove?.(activeDrag.obstacleIndex, nextRect);
+      event.preventDefault();
+
+      return;
+    }
+
+    if (activeDrag?.kind === "resize") {
+      const delta = {
+        x: boardPoint.x - activeDrag.startPoint.x,
+        y: boardPoint.y - activeDrag.startPoint.y,
+      };
+      const nextRect = resizeRectFromHandle(
+        activeDrag.startRect,
+        activeDrag.handle,
+        delta,
+        board,
+      );
+
+      onObstacleMove?.(activeDrag.obstacleIndex, nextRect);
+      event.preventDefault();
+
+      return;
+    }
+
+    const hitResizeHandle = findResizeHandleHit(
+      board,
+      boardPoint,
+      selectedObstacleIndex,
+    );
+
+    if (hitResizeHandle !== null) {
+      setCursor(getResizeCursor(hitResizeHandle));
+
+      return;
+    }
+
+    if (findEditablePadHit(board, boardPoint) !== null) {
+      setCursor("pointer");
+
+      return;
+    }
+
+    setCursor(findObstacleHit(board, boardPoint) === null ? "default" : "grab");
   };
-}
 
-function drawBackground(
-  ctx: CanvasRenderingContext2D,
-  canvasWidth: number,
-  canvasHeight: number,
-) {
-  ctx.fillStyle = "#101418";
-  ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-}
+  const handlePointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (dragState.current === null) {
+      return;
+    }
 
-function drawBoardFill(
-  ctx: CanvasRenderingContext2D,
-  board: DemoBoard,
-  transform: BoardTransform,
-) {
-  ctx.fillStyle = "#17241d";
-  ctx.fillRect(
-    transform.offsetX,
-    transform.offsetY,
-    board.width * transform.scale,
-    board.height * transform.scale,
+    dragState.current = null;
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    setCursor("default");
+    event.preventDefault();
+  };
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="boardCanvas"
+      style={{ cursor: isAddingObstacle ? "crosshair" : cursor }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+    />
   );
-}
-
-function drawBoardOutline(
-  ctx: CanvasRenderingContext2D,
-  board: DemoBoard,
-  transform: BoardTransform,
-) {
-  ctx.strokeStyle = "#6aa875";
-  ctx.lineWidth = 2;
-
-  ctx.strokeRect(
-    transform.offsetX,
-    transform.offsetY,
-    board.width * transform.scale,
-    board.height * transform.scale,
-  );
-}
-
-function drawGrid(
-  ctx: CanvasRenderingContext2D,
-  board: DemoBoard,
-  transform: BoardTransform,
-  spacing: number,
-) {
-  ctx.save();
-
-  ctx.strokeStyle = "#26343d";
-  ctx.lineWidth = 1;
-
-  for (let x = 0; x <= board.width; x += spacing) {
-    const sx = transform.offsetX + x * transform.scale;
-
-    ctx.beginPath();
-    ctx.moveTo(sx, transform.offsetY);
-    ctx.lineTo(sx, transform.offsetY + board.height * transform.scale);
-    ctx.stroke();
-  }
-
-  for (let y = 0; y <= board.height; y += spacing) {
-    const sy = transform.offsetY + y * transform.scale;
-
-    ctx.beginPath();
-    ctx.moveTo(transform.offsetX, sy);
-    ctx.lineTo(transform.offsetX + board.width * transform.scale, sy);
-    ctx.stroke();
-  }
-
-  ctx.restore();
-}
-
-function drawExpandedObstacles(
-  ctx: CanvasRenderingContext2D,
-  obstacles: Rect[],
-  transform: BoardTransform,
-) {
-  ctx.save();
-
-  ctx.fillStyle = "rgba(227, 107, 122, 0.14)";
-  ctx.strokeStyle = "rgba(227, 107, 122, 0.65)";
-  ctx.lineWidth = 1;
-  ctx.setLineDash([6, 4]);
-
-  for (const obstacle of obstacles) {
-    const rect = rectToCanvas(obstacle, transform);
-
-    ctx.beginPath();
-    ctx.rect(rect.x, rect.y, rect.width, rect.height);
-    ctx.fill();
-    ctx.stroke();
-  }
-
-  ctx.restore();
-}
-
-function drawObstacles(
-  ctx: CanvasRenderingContext2D,
-  obstacles: Rect[],
-  transform: BoardTransform,
-) {
-  ctx.save();
-
-  for (const obstacle of obstacles) {
-    const rect = rectToCanvas(obstacle, transform);
-
-    ctx.fillStyle = "#5b2530";
-    ctx.strokeStyle = "#e36b7a";
-    ctx.lineWidth = 2;
-
-    ctx.beginPath();
-    ctx.rect(rect.x, rect.y, rect.width, rect.height);
-    ctx.fill();
-    ctx.stroke();
-  }
-
-  ctx.restore();
-}
-
-function drawPads(
-  ctx: CanvasRenderingContext2D,
-  board: DemoBoard,
-  transform: BoardTransform,
-) {
-  ctx.save();
-
-  ctx.font = "13px system-ui, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-
-  for (const pad of board.pads) {
-    const center = toCanvas(pad.center, transform);
-    const radius = pad.radius * transform.scale;
-
-    ctx.fillStyle = "#c58b2b";
-    ctx.strokeStyle = "#ffd27a";
-    ctx.lineWidth = 2;
-
-    ctx.beginPath();
-    ctx.arc(center.x, center.y, radius, 0, 2 * Math.PI);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.fillStyle = "#101418";
-    ctx.fillText(pad.id, center.x, center.y);
-  }
-
-  ctx.restore();
-}
-
-function drawRoute(
-  ctx: CanvasRenderingContext2D,
-  points: Point[],
-  transform: BoardTransform,
-) {
-  if (points.length < 2) {
-    return;
-  }
-
-  ctx.save();
-
-  ctx.strokeStyle = "#55c7ff";
-  ctx.lineWidth = 5;
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-
-  const first = toCanvas(points[0], transform);
-
-  ctx.beginPath();
-  ctx.moveTo(first.x, first.y);
-
-  for (const point of points.slice(1)) {
-    const p = toCanvas(point, transform);
-    ctx.lineTo(p.x, p.y);
-  }
-
-  ctx.stroke();
-
-  ctx.fillStyle = "#d9f4ff";
-
-  for (const point of points) {
-    const p = toCanvas(point, transform);
-
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 4, 0, 2 * Math.PI);
-    ctx.fill();
-  }
-
-  ctx.restore();
 }

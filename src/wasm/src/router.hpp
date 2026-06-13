@@ -83,7 +83,21 @@ struct RouteDemoResult {
 };
 
 /*
- * @brief Computes a demo PCB route using a generated board and Boost.Graph A*.
+ * @brief Routes caller-provided board geometry.
+ *
+ * @param pads Flat pad buffer with layout x, y, radius, netIndex, ...
+ * @param obstacles Flat obstacle buffer with layout x, y, width, height, ...
+ * @param clearance Obstacle expansion distance in board units.
+ * @return Route geometry, pads, obstacles, expanded obstacles, and metrics.
+ */
+RouteDemoResult routeBoard(
+    const std::vector<float>& pads,
+    const std::vector<float>& obstacles,
+    float clearance
+);
+
+/*
+ * @brief Computes a demo route using a generated board and Boost.Graph A*.
  *
  * @param clearance Obstacle expansion distance in board units.
  * @param seed Deterministic random seed used to generate the board.
@@ -92,4 +106,3 @@ struct RouteDemoResult {
 RouteDemoResult computeDemoRoute(float clearance, int seed);
 
 } // namespace PCBRouter
-

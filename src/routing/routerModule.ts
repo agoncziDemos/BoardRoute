@@ -23,23 +23,57 @@ type WasmRouteDemoResult = {
   metrics: Float32Array;
 };
 
+type BoardRouteResult = {
+  board: DemoBoard;
+  route: RouteResult;
+};
+
 let routerModulePromise: ReturnType<typeof createRouterModule> | null = null;
+
+export async function routeBoardFromWasm(
+  board: DemoBoard,
+  clearance: number,
+): Promise<BoardRouteResult> {
+  const module = await getRouterModule();
+  const result = module.routeBoard(
+    packPads(board.pads),
+    packRects(board.obstacles),
+    clearance,
+  );
+
+  return toBoardRouteResult(result, board);
+}
 
 export async function routeDemoBoardFromWasm(
   clearance: number,
   seed: number,
-): Promise<{
-  board: DemoBoard;
-  route: RouteResult;
-}> {
+): Promise<BoardRouteResult> {
   const module = await getRouterModule();
   const result = module.computeDemoRoute(clearance, seed);
+
+  return toBoardRouteResult(result, demoBoard);
+}
+
+function getRouterModule(): ReturnType<typeof createRouterModule> {
+  routerModulePromise ??= createRouterModule({
+    locateFile: (path: string, _prefix: string): string => {
+      return new URL(`../wasm/dist/${path}`, import.meta.url).href;
+    },
+  });
+
+  return routerModulePromise;
+}
+
+function toBoardRouteResult(
+  result: WasmRouteDemoResult,
+  fallbackBoard: DemoBoard,
+): BoardRouteResult {
   const pads = readPads(result.pads);
   const metricReadResult = readMetrics(result.metrics);
 
   return {
     board: {
-      ...demoBoard,
+      ...fallbackBoard,
       pads,
       nets: createNets(pads),
       obstacles: readRects(result.obstacles),
@@ -54,14 +88,37 @@ export async function routeDemoBoardFromWasm(
   };
 }
 
-function getRouterModule(): ReturnType<typeof createRouterModule> {
-  routerModulePromise ??= createRouterModule({
-    locateFile: (path: string, _prefix: string): string => {
-      return new URL(`../wasm/dist/${path}`, import.meta.url).href;
-    },
+function packPads(pads: Pad[]): Float32Array {
+  const values = new Float32Array(pads.length * 4);
+
+  pads.forEach((pad, index) => {
+    const offset = index * 4;
+    const netIndex = pad.netId === "N1"
+      ? 1
+      : Number.parseInt(pad.netId.replace("N", ""), 10) || index + 1;
+
+    values[offset] = pad.center.x;
+    values[offset + 1] = pad.center.y;
+    values[offset + 2] = pad.radius;
+    values[offset + 3] = netIndex;
   });
 
-  return routerModulePromise;
+  return values;
+}
+
+function packRects(rects: Rect[]): Float32Array {
+  const values = new Float32Array(rects.length * 4);
+
+  rects.forEach((rect, index) => {
+    const offset = index * 4;
+
+    values[offset] = rect.x;
+    values[offset + 1] = rect.y;
+    values[offset + 2] = rect.width;
+    values[offset + 3] = rect.height;
+  });
+
+  return values;
 }
 
 function readPads(values: WasmRouteDemoResult["pads"]): Pad[] {

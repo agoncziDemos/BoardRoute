@@ -12,7 +12,6 @@ using PCBRouter::BoardHeight;
 using PCBRouter::BoardWidth;
 using PCBRouter::GeneratedBoard;
 using PCBRouter::Pad;
-using PCBRouter::Point;
 using PCBRouter::Rect;
 
 /*
@@ -137,7 +136,7 @@ bool isObstacleAllowed(
  * @brief Creates randomized pads for the demo board.
  *
  * @param generator Random number generator.
- * @return Pad list with two routed pads and decorative pads.
+ * @return Pad list with two routed pads.
  */
 std::vector<Pad> createPads(std::mt19937& generator) {
     std::vector<Pad> pads;
@@ -233,14 +232,11 @@ std::vector<Rect> createObstacles(
     return obstacles;
 }
 
-/*
- * @brief Expands obstacle rectangles by a clearance amount.
- *
- * @param obstacles Original obstacle rectangles.
- * @param clearance Obstacle expansion distance in board units.
- * @return Expanded rectangular obstacle list.
- */
-std::vector<Rect> createExpandedObstacles(
+} // namespace
+
+namespace PCBRouter {
+
+std::vector<Rect> expandObstacles(
     const std::vector<Rect>& obstacles,
     float clearance
 ) {
@@ -261,18 +257,13 @@ std::vector<Rect> createExpandedObstacles(
     return expandedObstacles;
 }
 
-} // namespace
-
-namespace PCBRouter {
-
 GeneratedBoard generateBoard(float clearance, int seed) {
     std::mt19937 generator = createGenerator(seed);
 
     GeneratedBoard board;
     board.pads = createPads(generator);
     board.obstacles = createObstacles(generator, board.pads);
-    board.expandedObstacles =
-        createExpandedObstacles(board.obstacles, clearance);
+    board.expandedObstacles = expandObstacles(board.obstacles, clearance);
 
     return board;
 }

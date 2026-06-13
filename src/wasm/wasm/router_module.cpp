@@ -7,4 +7,8 @@ EMSCRIPTEN_BINDINGS(router_module) {
         "computeDemoRoute",
         &computeDemoRouteFromJavaScript
     );
+    emscripten::function(
+        "routeBoard",
+        &routeBoardFromJavaScript
+    );
 }

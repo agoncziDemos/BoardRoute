@@ -2,12 +2,71 @@ import { useEffect, useRef, useState } from "react";
 import { BoardCanvas } from "./components/BoardCanvas";
 import { MetricsPanel } from "./components/MetricsPanel";
 import { demoBoard, demoRoute } from "./demo/demoBoard";
-import { routeDemoBoardFromWasm } from "./routing/routerModule";
-import type { DemoBoard, RouteResult } from "./routing/routeTypes";
+import {
+  routeBoardFromWasm,
+  routeDemoBoardFromWasm,
+} from "./routing/routerModule";
+import type { DemoBoard, Point, Rect, RouteResult } from "./routing/routeTypes";
 import "./App.css";
 
 function createRandomSeed(): number {
   return Math.floor(Math.random() * 2_147_483_647);
+}
+
+const NewObstacleSize = 40;
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(Math.max(value, minimum), maximum);
+}
+
+function createObstacleAtCenter(board: DemoBoard, center: Point): Rect {
+  return {
+    x: clamp(center.x - NewObstacleSize / 2, 0, board.width - NewObstacleSize),
+    y: clamp(center.y - NewObstacleSize / 2, 0, board.height - NewObstacleSize),
+    width: NewObstacleSize,
+    height: NewObstacleSize,
+  };
+}
+
+function movePad(board: DemoBoard, padId: string, center: Point): DemoBoard {
+  return {
+    ...board,
+    pads: board.pads.map((pad) =>
+      pad.id === padId
+        ? {
+            ...pad,
+            center,
+          }
+        : pad,
+    ),
+  };
+}
+
+function moveObstacle(
+  board: DemoBoard,
+  obstacleIndex: number,
+  obstacle: Rect,
+): DemoBoard {
+  return {
+    ...board,
+    obstacles: board.obstacles.map((candidate, index) =>
+      index === obstacleIndex ? obstacle : candidate,
+    ),
+  };
+}
+
+function deleteObstacle(board: DemoBoard, obstacleIndex: number): DemoBoard {
+  return {
+    ...board,
+    obstacles: board.obstacles.filter((_, index) => index !== obstacleIndex),
+  };
+}
+
+function addObstacle(board: DemoBoard, center: Point): DemoBoard {
+  return {
+    ...board,
+    obstacles: [...board.obstacles, createObstacleAtCenter(board, center)],
+  };
 }
 
 export default function App() {
@@ -16,20 +75,36 @@ export default function App() {
   const [board, setBoard] = useState<DemoBoard>(demoBoard);
   const [route, setRoute] = useState<RouteResult>(demoRoute);
   const [status, setStatus] = useState("Ready to route with C++/WASM.");
+  const [selectedObstacleIndex, setSelectedObstacleIndex] = useState<
+    number | null
+  >(null);
+  const [isAddingObstacle, setIsAddingObstacle] = useState(false);
   const latestRouteRequest = useRef(0);
+  const currentBoardSeed = useRef<number | null>(null);
+  const boardRef = useRef<DemoBoard>(demoBoard);
 
   useEffect(() => {
     const requestId = latestRouteRequest.current + 1;
     latestRouteRequest.current = requestId;
 
+    const shouldRandomize = currentBoardSeed.current !== boardSeed;
+    const routePromise = shouldRandomize
+      ? routeDemoBoardFromWasm(clearance, boardSeed)
+      : routeBoardFromWasm(boardRef.current, clearance);
+
     setStatus("Routing with C++/WASM...");
 
-    routeDemoBoardFromWasm(clearance, boardSeed)
+    routePromise
       .then((result) => {
         if (latestRouteRequest.current !== requestId) {
           return;
         }
 
+        if (shouldRandomize) {
+          currentBoardSeed.current = boardSeed;
+        }
+
+        boardRef.current = result.board;
         setBoard(result.board);
         setRoute(result.route);
         setStatus(
@@ -49,7 +124,81 @@ export default function App() {
       });
   }, [clearance, boardSeed]);
 
+  const routeEditedBoard = (nextBoard: DemoBoard) => {
+    const requestId = latestRouteRequest.current + 1;
+    latestRouteRequest.current = requestId;
+
+    boardRef.current = nextBoard;
+    setBoard(nextBoard);
+    setStatus("Routing with C++/WASM...");
+
+    routeBoardFromWasm(nextBoard, clearance)
+      .then((result) => {
+        if (latestRouteRequest.current !== requestId) {
+          return;
+        }
+
+        boardRef.current = result.board;
+        setBoard(result.board);
+        setRoute(result.route);
+        setStatus(
+          result.route.success
+            ? `Edited board, clearance ${clearance}.`
+            : `No path. Edited board, clearance ${clearance}.`,
+        );
+      })
+      .catch((error: unknown) => {
+        if (latestRouteRequest.current !== requestId) {
+          return;
+        }
+
+        setStatus(
+          error instanceof Error ? error.message : "Failed to load C++ route.",
+        );
+      });
+  };
+
+  const moveRoutePad = (padId: string, center: Point) => {
+    routeEditedBoard(movePad(boardRef.current, padId, center));
+  };
+
+  const moveRouteObstacle = (obstacleIndex: number, obstacle: Rect) => {
+    routeEditedBoard(moveObstacle(boardRef.current, obstacleIndex, obstacle));
+  };
+
+  const deleteSelectedObstacle = () => {
+    if (selectedObstacleIndex === null) {
+      return;
+    }
+
+    setIsAddingObstacle(false);
+    setSelectedObstacleIndex(null);
+    routeEditedBoard(deleteObstacle(boardRef.current, selectedObstacleIndex));
+  };
+
+  const addRouteObstacle = (center: Point) => {
+    const nextBoard = addObstacle(boardRef.current, center);
+
+    setIsAddingObstacle(false);
+    setSelectedObstacleIndex(nextBoard.obstacles.length - 1);
+    routeEditedBoard(nextBoard);
+  };
+
+  const toggleAddObstacle = () => {
+    const nextIsAdding = !isAddingObstacle;
+
+    setIsAddingObstacle(nextIsAdding);
+    setSelectedObstacleIndex(null);
+    setStatus(
+      nextIsAdding
+        ? "Click the board to place a new obstacle."
+        : "Ready to route with C++/WASM.",
+    );
+  };
+
   const randomizeBoard = () => {
+    setIsAddingObstacle(false);
+    setSelectedObstacleIndex(null);
     setBoardSeed(createRandomSeed());
   };
 
@@ -80,11 +229,38 @@ export default function App() {
           Randomize board
         </button>
 
+        <button
+          type="button"
+          className={isAddingObstacle ? "activeButton" : undefined}
+          onClick={toggleAddObstacle}
+        >
+          {isAddingObstacle ? "Cancel add obstacle" : "Add obstacle"}
+        </button>
+
+        {selectedObstacleIndex !== null && (
+          <button
+            type="button"
+            className="dangerButton"
+            onClick={deleteSelectedObstacle}
+          >
+            Delete selected obstacle
+          </button>
+        )}
+
         <p>{status}</p>
       </section>
 
       <section className="layout">
-        <BoardCanvas board={board} route={route} />
+        <BoardCanvas
+          board={board}
+          route={route}
+          selectedObstacleIndex={selectedObstacleIndex}
+          isAddingObstacle={isAddingObstacle}
+          onObstacleSelect={setSelectedObstacleIndex}
+          onObstacleAdd={addRouteObstacle}
+          onPadMove={moveRoutePad}
+          onObstacleMove={moveRouteObstacle}
+        />
         <MetricsPanel route={route} />
       </section>
     </main>

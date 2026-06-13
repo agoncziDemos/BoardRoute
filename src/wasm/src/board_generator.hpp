@@ -13,18 +13,17 @@ struct GeneratedBoard {
     /*
      * @brief Pads on the generated board.
      *
-     * The first two pads belong to the routed net. Remaining pads are
-     * decorative components that make the board look denser.
+     * The first two pads belong to the routed net.
      */
     std::vector<Pad> pads;
 
     /*
-     * @brief Component obstacle rectangles before clearance expansion.
+     * @brief Obstacle rectangles before clearance expansion.
      */
     std::vector<Rect> obstacles;
 
     /*
-     * @brief Component obstacle rectangles after clearance expansion.
+     * @brief Obstacle rectangles after clearance expansion.
      */
     std::vector<Rect> expandedObstacles;
 };
@@ -38,5 +37,16 @@ struct GeneratedBoard {
  */
 GeneratedBoard generateBoard(float clearance, int seed);
 
-} // namespace PCBRouter
+/*
+ * @brief Expands obstacle rectangles by a clearance amount.
+ *
+ * @param obstacles Original obstacle rectangles.
+ * @param clearance Obstacle expansion distance in board units.
+ * @return Expanded rectangular obstacle list.
+ */
+std::vector<Rect> expandObstacles(
+    const std::vector<Rect>& obstacles,
+    float clearance
+);
 
+} // namespace PCBRouter

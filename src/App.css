@@ -126,3 +126,19 @@
     height: 520px;
   }
 }
+.controlsPanel button.dangerButton {
+  color: #fff5f5;
+  background: #d84848;
+}
+
+.controlsPanel button.dangerButton:hover {
+  background: #ef5f5f;
+}
+.controlsPanel button.activeButton {
+  color: #071017;
+  background: #fff0a8;
+}
+
+.controlsPanel button.activeButton:hover {
+  background: #fff6c9;
+}

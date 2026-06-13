@@ -14,6 +14,11 @@ declare module "*/wasm/dist/router.js" {
 
   export type RouterModule = {
     computeDemoRoute(clearance: number, seed: number): WasmRouteDemoResult;
+    routeBoard(
+      pads: Float32Array,
+      obstacles: Float32Array,
+      clearance: number,
+    ): WasmRouteDemoResult;
   };
 
   export type RouterModuleOptions = {
@@ -26,4 +31,3 @@ declare module "*/wasm/dist/router.js" {
 
   export default createRouterModule;
 }
-
