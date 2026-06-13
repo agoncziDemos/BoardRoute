@@ -7,3 +7,4 @@ src/wasm/dist/
 
 .DS_Store
 *.log
+code_snapshot.txt
