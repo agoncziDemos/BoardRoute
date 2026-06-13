@@ -1,0 +1,782 @@
+#include "router.hpp"
+
+#include <boost/graph/adjacency_list.hpp>
+#include <boost/graph/astar_search.hpp>
+#include <boost/graph/properties.hpp>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <random>
+#include <vector>
+
+namespace {
+
+constexpr int BoardWidth = 3000;
+constexpr int BoardHeight = 1500;
+constexpr int GridSize = 10;
+constexpr int GridWidth = BoardWidth / GridSize + 1;
+constexpr int GridHeight = BoardHeight / GridSize + 1;
+constexpr int TotalGridCells = GridWidth * GridHeight;
+constexpr int RandomObstacleCount = 12;
+constexpr int RandomDecorativePadCount = 10;
+
+using Clock = std::chrono::steady_clock;
+
+using Graph = boost::adjacency_list<
+    boost::vecS,
+    boost::vecS,
+    boost::undirectedS,
+    boost::no_property,
+    boost::property<boost::edge_weight_t, float>
+>;
+
+using Vertex = boost::graph_traits<Graph>::vertex_descriptor;
+
+struct Point {
+    float x = 0.0F;
+    float y = 0.0F;
+};
+
+struct GridPoint {
+    int column = 0;
+    int row = 0;
+};
+
+struct Rect {
+    float x = 0.0F;
+    float y = 0.0F;
+    float width = 0.0F;
+    float height = 0.0F;
+};
+
+struct Pad {
+    Point center;
+    float radius = 0.0F;
+    int netIndex = 0;
+};
+
+struct RouteSearchResult {
+    bool success = false;
+    std::vector<GridPoint> path;
+};
+
+struct FoundGoalException {};
+
+/*
+ * @brief Converts a grid coordinate into a flattened grid index.
+ *
+ * @param point Grid coordinate.
+ * @return Flattened grid index.
+ */
+int toIndex(const GridPoint& point) {
+    return point.row * GridWidth + point.column;
+}
+
+/*
+ * @brief Converts a flattened grid index into a grid coordinate.
+ *
+ * @param index Flattened grid index.
+ * @return Grid coordinate.
+ */
+GridPoint toGridPoint(int index) {
+    return {
+        index % GridWidth,
+        index / GridWidth,
+    };
+}
+
+/*
+ * @brief Converts a world-space point into the nearest grid coordinate.
+ *
+ * @param point World-space point.
+ * @return Nearest grid coordinate.
+ */
+GridPoint toGridPoint(const Point& point) {
+    const int column = static_cast<int>(
+        std::round(point.x / static_cast<float>(GridSize))
+    );
+    const int row = static_cast<int>(
+        std::round(point.y / static_cast<float>(GridSize))
+    );
+
+    return {
+        std::clamp(column, 0, GridWidth - 1),
+        std::clamp(row, 0, GridHeight - 1),
+    };
+}
+
+/*
+ * @brief Converts a grid coordinate into a world-space point.
+ *
+ * @param point Grid coordinate.
+ * @return World-space point.
+ */
+Point toPoint(const GridPoint& point) {
+    return {
+        static_cast<float>(point.column * GridSize),
+        static_cast<float>(point.row * GridSize),
+    };
+}
+
+/*
+ * @brief Checks whether a grid coordinate is inside the board grid.
+ *
+ * @param point Grid coordinate.
+ * @return True if the coordinate is inside the board grid.
+ */
+bool isInsideGrid(const GridPoint& point) {
+    return point.column >= 0
+        && point.column < GridWidth
+        && point.row >= 0
+        && point.row < GridHeight;
+}
+
+/*
+ * @brief Checks whether a world-space point lies inside a rectangle.
+ *
+ * @param point World-space point.
+ * @param rect Rectangle.
+ * @return True if the point is inside or on the rectangle boundary.
+ */
+bool isInsideRect(const Point& point, const Rect& rect) {
+    return point.x >= rect.x
+        && point.x <= rect.x + rect.width
+        && point.y >= rect.y
+        && point.y <= rect.y + rect.height;
+}
+
+/*
+ * @brief Checks whether a rectangle intersects a pad keepout circle.
+ *
+ * @param rect Rectangle to test.
+ * @param pad Pad to test against.
+ * @param extraClearance Additional keepout distance.
+ * @return True if the rectangle intersects the pad keepout.
+ */
+bool intersectsPadKeepout(const Rect& rect, const Pad& pad, float extraClearance) {
+    const float closestX = std::clamp(
+        pad.center.x,
+        rect.x,
+        rect.x + rect.width
+    );
+    const float closestY = std::clamp(
+        pad.center.y,
+        rect.y,
+        rect.y + rect.height
+    );
+
+    const float dx = pad.center.x - closestX;
+    const float dy = pad.center.y - closestY;
+    const float radius = pad.radius + extraClearance;
+
+    return dx * dx + dy * dy <= radius * radius;
+}
+
+/*
+ * @brief Checks whether a candidate obstacle is safe to add near the pads.
+ *
+ * @param rect Candidate obstacle.
+ * @param pads Existing pads.
+ * @return True if the obstacle does not block pad keepouts.
+ */
+bool isObstacleAllowed(const Rect& rect, const std::vector<Pad>& pads) {
+    for (const Pad& pad : pads) {
+        if (intersectsPadKeepout(rect, pad, 90.0F)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/*
+ * @brief Appends a pad to a flat pad buffer.
+ *
+ * @param buffer Flat pad buffer.
+ * @param pad Pad to append.
+ */
+void appendPad(std::vector<float>& buffer, const Pad& pad) {
+    buffer.push_back(pad.center.x);
+    buffer.push_back(pad.center.y);
+    buffer.push_back(pad.radius);
+    buffer.push_back(static_cast<float>(pad.netIndex));
+}
+
+/*
+ * @brief Appends a point to a flat point buffer.
+ *
+ * @param buffer Flat point buffer.
+ * @param point Point to append.
+ */
+void appendPoint(std::vector<float>& buffer, const Point& point) {
+    buffer.push_back(point.x);
+    buffer.push_back(point.y);
+}
+
+/*
+ * @brief Appends a rectangle to a flat rectangle buffer.
+ *
+ * @param buffer Flat rectangle buffer.
+ * @param rect Rectangle to append.
+ */
+void appendRect(std::vector<float>& buffer, const Rect& rect) {
+    buffer.push_back(rect.x);
+    buffer.push_back(rect.y);
+    buffer.push_back(rect.width);
+    buffer.push_back(rect.height);
+}
+
+/*
+ * @brief Creates a deterministic random number generator.
+ *
+ * @param seed Integer seed received from JavaScript.
+ * @return Random number generator.
+ */
+std::mt19937 createGenerator(int seed) {
+    const std::uint32_t normalizedSeed = seed > 0
+        ? static_cast<std::uint32_t>(seed)
+        : 1U;
+
+    return std::mt19937(normalizedSeed);
+}
+
+/*
+ * @brief Creates randomized pads for the demo board.
+ *
+ * @param generator Random number generator.
+ * @return Pad list with two routed pads and decorative pads.
+ */
+std::vector<Pad> createPads(std::mt19937& generator) {
+    std::uniform_real_distribution<float> startY(130.0F, 360.0F);
+    std::uniform_real_distribution<float> goalY(1140.0F, 1370.0F);
+    std::uniform_real_distribution<float> x(320.0F, 2680.0F);
+    std::uniform_real_distribution<float> y(180.0F, 1320.0F);
+    std::uniform_real_distribution<float> radius(15.0F, 24.0F);
+
+    std::vector<Pad> pads;
+    pads.reserve(RandomDecorativePadCount + 2);
+
+    pads.push_back({
+        {160.0F, startY(generator)},
+        26.0F,
+        1,
+    });
+    pads.push_back({
+        {2840.0F, goalY(generator)},
+        26.0F,
+        1,
+    });
+
+    for (int i = 0; i < RandomDecorativePadCount; ++i) {
+        pads.push_back({
+            {x(generator), y(generator)},
+            radius(generator),
+            i + 2,
+        });
+    }
+
+    return pads;
+}
+
+/*
+ * @brief Creates randomized rectangular board obstacles.
+ *
+ * @param generator Random number generator.
+ * @param pads Pads that obstacles should avoid.
+ * @return Random obstacle list.
+ */
+std::vector<Rect> createObstacles(
+    std::mt19937& generator,
+    const std::vector<Pad>& pads
+) {
+    std::uniform_real_distribution<float> x(350.0F, 2480.0F);
+    std::uniform_real_distribution<float> y(80.0F, 1080.0F);
+    std::uniform_real_distribution<float> width(120.0F, 270.0F);
+    std::uniform_real_distribution<float> height(180.0F, 560.0F);
+
+    std::vector<Rect> obstacles;
+    obstacles.reserve(RandomObstacleCount);
+
+    int attempts = 0;
+
+    while (
+        static_cast<int>(obstacles.size()) < RandomObstacleCount
+        && attempts < 600
+    ) {
+        ++attempts;
+
+        const Rect candidate = {
+            x(generator),
+            y(generator),
+            width(generator),
+            height(generator),
+        };
+
+        if (!isObstacleAllowed(candidate, pads)) {
+            continue;
+        }
+
+        obstacles.push_back(candidate);
+    }
+
+    return obstacles;
+}
+
+/*
+ * @brief Expands obstacle rectangles by a clearance amount.
+ *
+ * @param obstacles Original obstacle rectangles.
+ * @param clearance Obstacle expansion distance in board units.
+ * @return Expanded rectangular obstacle list.
+ */
+std::vector<Rect> createExpandedObstacles(
+    const std::vector<Rect>& obstacles,
+    float clearance
+) {
+    const float clampedClearance = std::max(0.0F, clearance);
+
+    std::vector<Rect> expandedObstacles;
+    expandedObstacles.reserve(obstacles.size());
+
+    for (const Rect& obstacle : obstacles) {
+        expandedObstacles.push_back({
+            obstacle.x - clampedClearance,
+            obstacle.y - clampedClearance,
+            obstacle.width + 2.0F * clampedClearance,
+            obstacle.height + 2.0F * clampedClearance,
+        });
+    }
+
+    return expandedObstacles;
+}
+
+/*
+ * @brief Builds a blocked-cell map from expanded obstacle rectangles.
+ *
+ * @param expandedObstacles Expanded obstacle rectangles.
+ * @param start Start coordinate, forced unblocked.
+ * @param goal Goal coordinate, forced unblocked.
+ * @return Blocked-cell map.
+ */
+std::vector<bool> buildBlockedCells(
+    const std::vector<Rect>& expandedObstacles,
+    const GridPoint& start,
+    const GridPoint& goal
+) {
+    std::vector<bool> blocked(TotalGridCells, false);
+
+    for (int row = 0; row < GridHeight; ++row) {
+        for (int column = 0; column < GridWidth; ++column) {
+            const GridPoint gridPoint = {column, row};
+            const Point point = toPoint(gridPoint);
+
+            for (const Rect& rect : expandedObstacles) {
+                if (isInsideRect(point, rect)) {
+                    blocked[toIndex(gridPoint)] = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    blocked[toIndex(start)] = false;
+    blocked[toIndex(goal)] = false;
+
+    return blocked;
+}
+
+/*
+ * @brief Adds one weighted graph edge between two neighboring grid cells.
+ *
+ * @param graph Routing graph.
+ * @param source Source grid coordinate.
+ * @param target Target grid coordinate.
+ * @param blocked Blocked-cell map.
+ */
+void addRoutingEdge(
+    Graph& graph,
+    const GridPoint& source,
+    const GridPoint& target,
+    const std::vector<bool>& blocked
+) {
+    if (!isInsideGrid(target)) {
+        return;
+    }
+
+    const int sourceIndex = toIndex(source);
+    const int targetIndex = toIndex(target);
+
+    if (blocked[sourceIndex] || blocked[targetIndex]) {
+        return;
+    }
+
+    boost::add_edge(
+        static_cast<Vertex>(sourceIndex),
+        static_cast<Vertex>(targetIndex),
+        1.0F,
+        graph
+    );
+}
+
+/*
+ * @brief Builds a Boost.Graph routing graph from the blocked-cell map.
+ *
+ * @param blocked Blocked-cell map.
+ * @return Routing graph with one vertex per grid cell.
+ */
+Graph buildRoutingGraph(const std::vector<bool>& blocked) {
+    Graph graph(TotalGridCells);
+
+    for (int row = 0; row < GridHeight; ++row) {
+        for (int column = 0; column < GridWidth; ++column) {
+            const GridPoint source = {column, row};
+
+            addRoutingEdge(graph, source, {column + 1, row}, blocked);
+            addRoutingEdge(graph, source, {column, row + 1}, blocked);
+        }
+    }
+
+    return graph;
+}
+
+/*
+ * @brief A* heuristic for estimating grid distance to the goal.
+ */
+class ManhattanHeuristic : public boost::astar_heuristic<Graph, float> {
+public:
+    /*
+     * @brief Creates a Manhattan-distance heuristic toward a fixed goal.
+     *
+     * @param goal Goal grid coordinate.
+     */
+    explicit ManhattanHeuristic(GridPoint goal)
+        : goal_(goal) {}
+
+    /*
+     * @brief Estimates remaining path cost from a graph vertex to the goal.
+     *
+     * @param vertex Graph vertex representing a grid cell.
+     * @return Estimated remaining cost.
+     */
+    float operator()(Vertex vertex) const {
+        const GridPoint point = toGridPoint(static_cast<int>(vertex));
+
+        return static_cast<float>(
+            std::abs(point.column - goal_.column)
+            + std::abs(point.row - goal_.row)
+        );
+    }
+
+private:
+    GridPoint goal_;
+};
+
+/*
+ * @brief A* visitor that stops the Boost.Graph search when the goal is reached.
+ */
+class GoalVisitor : public boost::default_astar_visitor {
+public:
+    /*
+     * @brief Creates a visitor for a fixed goal vertex.
+     *
+     * @param goal Goal vertex.
+     */
+    explicit GoalVisitor(Vertex goal)
+        : goal_(goal) {}
+
+    /*
+     * @brief Called by Boost.Graph when a vertex is examined.
+     *
+     * @param vertex Current vertex.
+     * @param graph Search graph.
+     */
+    void examine_vertex(Vertex vertex, const Graph& graph) {
+        (void)graph;
+
+        if (vertex == goal_) {
+            throw FoundGoalException();
+        }
+    }
+
+private:
+    Vertex goal_;
+};
+
+/*
+ * @brief Reconstructs a grid path from a Boost.Graph predecessor map.
+ *
+ * @param predecessors Predecessor vertex map.
+ * @param start Start grid coordinate.
+ * @param goal Goal grid coordinate.
+ * @return Full grid path from start to goal.
+ */
+std::vector<GridPoint> reconstructPath(
+    const std::vector<Vertex>& predecessors,
+    const GridPoint& start,
+    const GridPoint& goal
+) {
+    const Vertex startVertex = static_cast<Vertex>(toIndex(start));
+    const Vertex goalVertex = static_cast<Vertex>(toIndex(goal));
+
+    std::vector<GridPoint> path;
+    Vertex current = goalVertex;
+
+    while (current != startVertex) {
+        path.push_back(toGridPoint(static_cast<int>(current)));
+        current = predecessors[current];
+    }
+
+    path.push_back(start);
+    std::reverse(path.begin(), path.end());
+
+    return path;
+}
+
+/*
+ * @brief Runs Boost.Graph A* search on the routing graph.
+ *
+ * @param graph Routing graph.
+ * @param start Start grid coordinate.
+ * @param goal Goal grid coordinate.
+ * @return Search result containing success flag and grid path.
+ */
+RouteSearchResult searchRouteWithBoostGraph(
+    const Graph& graph,
+    const GridPoint& start,
+    const GridPoint& goal
+) {
+    const Vertex startVertex = static_cast<Vertex>(toIndex(start));
+    const Vertex goalVertex = static_cast<Vertex>(toIndex(goal));
+
+    std::vector<Vertex> predecessors(TotalGridCells);
+    std::vector<float> distances(
+        TotalGridCells,
+        std::numeric_limits<float>::max()
+    );
+
+    for (int i = 0; i < TotalGridCells; ++i) {
+        predecessors[i] = static_cast<Vertex>(i);
+    }
+
+    try {
+        boost::astar_search(
+            graph,
+            startVertex,
+            ManhattanHeuristic(goal),
+            boost::predecessor_map(predecessors.data())
+                .distance_map(distances.data())
+                .weight_map(boost::get(boost::edge_weight, graph))
+                .visitor(GoalVisitor(goalVertex))
+        );
+    } catch (const FoundGoalException&) {
+        return {
+            true,
+            reconstructPath(predecessors, start, goal),
+        };
+    }
+
+    return {};
+}
+
+/*
+ * @brief Removes unnecessary intermediate points from an axis-aligned grid path.
+ *
+ * @param path Full grid path.
+ * @return Compressed grid path with only endpoints and bend points.
+ */
+std::vector<GridPoint> compressPath(const std::vector<GridPoint>& path) {
+    if (path.size() <= 2) {
+        return path;
+    }
+
+    std::vector<GridPoint> compressed;
+    compressed.push_back(path.front());
+
+    int previousColumnDirection = path[1].column - path[0].column;
+    int previousRowDirection = path[1].row - path[0].row;
+
+    for (std::size_t i = 2; i < path.size(); ++i) {
+        const int columnDirection = path[i].column - path[i - 1].column;
+        const int rowDirection = path[i].row - path[i - 1].row;
+
+        if (
+            columnDirection != previousColumnDirection
+            || rowDirection != previousRowDirection
+        ) {
+            compressed.push_back(path[i - 1]);
+            previousColumnDirection = columnDirection;
+            previousRowDirection = rowDirection;
+        }
+    }
+
+    compressed.push_back(path.back());
+
+    return compressed;
+}
+
+/*
+ * @brief Converts a compressed grid path into world-space route points.
+ *
+ * @param path Compressed grid path.
+ * @return World-space route points.
+ */
+std::vector<Point> toRoutePoints(const std::vector<GridPoint>& path) {
+    std::vector<Point> routePoints;
+
+    for (const GridPoint& gridPoint : path) {
+        routePoints.push_back(toPoint(gridPoint));
+    }
+
+    return routePoints;
+}
+
+/*
+ * @brief Computes the total route length.
+ *
+ * @param points Route points.
+ * @return Route length in board units.
+ */
+float computeLength(const std::vector<Point>& points) {
+    float length = 0.0F;
+
+    for (std::size_t i = 1; i < points.size(); ++i) {
+        const float dx = points[i].x - points[i - 1].x;
+        const float dy = points[i].y - points[i - 1].y;
+
+        length += std::sqrt(dx * dx + dy * dy);
+    }
+
+    return length;
+}
+
+/*
+ * @brief Computes the number of route bends.
+ *
+ * @param points Route points.
+ * @return Number of bends.
+ */
+int computeBends(const std::vector<Point>& points) {
+    int bends = 0;
+
+    for (std::size_t i = 2; i < points.size(); ++i) {
+        const float dx0 = points[i - 1].x - points[i - 2].x;
+        const float dy0 = points[i - 1].y - points[i - 2].y;
+        const float dx1 = points[i].x - points[i - 1].x;
+        const float dy1 = points[i].y - points[i - 1].y;
+
+        const int sx0 = (dx0 > 0.0F) - (dx0 < 0.0F);
+        const int sy0 = (dy0 > 0.0F) - (dy0 < 0.0F);
+        const int sx1 = (dx1 > 0.0F) - (dx1 < 0.0F);
+        const int sy1 = (dy1 > 0.0F) - (dy1 < 0.0F);
+
+        if (sx0 != sx1 || sy0 != sy1) {
+            ++bends;
+        }
+    }
+
+    return bends;
+}
+
+/*
+ * @brief Computes elapsed milliseconds between two time points.
+ *
+ * @param start Start time.
+ * @param end End time.
+ * @return Elapsed milliseconds.
+ */
+float elapsedMilliseconds(Clock::time_point start, Clock::time_point end) {
+    return static_cast<float>(
+        std::chrono::duration<double, std::milli>(end - start).count()
+    );
+}
+
+} // namespace
+
+namespace PCBRouter {
+
+RouteDemoResult computeDemoRoute(float clearance, int seed) {
+    const auto startTime = Clock::now();
+
+    std::mt19937 generator = createGenerator(seed);
+    const std::vector<Pad> pads = createPads(generator);
+
+    const Point startPoint = pads[0].center;
+    const Point goalPoint = pads[1].center;
+
+    const GridPoint start = toGridPoint(startPoint);
+    const GridPoint goal = toGridPoint(goalPoint);
+
+    const std::vector<Rect> obstacles = createObstacles(generator, pads);
+    const std::vector<Rect> expandedObstacles =
+        createExpandedObstacles(obstacles, clearance);
+    const std::vector<bool> blocked =
+        buildBlockedCells(expandedObstacles, start, goal);
+    const Graph graph = buildRoutingGraph(blocked);
+    const RouteSearchResult searchResult =
+        searchRouteWithBoostGraph(graph, start, goal);
+
+    std::vector<Point> routePoints;
+
+    if (searchResult.success) {
+        routePoints = toRoutePoints(compressPath(searchResult.path));
+    } else {
+        routePoints = {
+            startPoint,
+            goalPoint,
+        };
+    }
+
+    const float length = computeLength(routePoints);
+    const int bends = computeBends(routePoints);
+    const int vias = 0;
+    const int violations = searchResult.success ? 0 : 1;
+    const float score = searchResult.success
+        ? length + static_cast<float>(bends) * 60.0F
+        : 999999.0F;
+
+    const auto endTime = Clock::now();
+    const float runtimeMs = elapsedMilliseconds(startTime, endTime);
+
+    RouteDemoResult result;
+
+    for (const Pad& pad : pads) {
+        appendPad(result.pads, pad);
+    }
+
+    for (const Point& point : routePoints) {
+        appendPoint(result.routePoints, point);
+    }
+
+    for (const Rect& rect : obstacles) {
+        appendRect(result.obstacles, rect);
+    }
+
+    for (const Rect& rect : expandedObstacles) {
+        appendRect(result.expandedObstacles, rect);
+    }
+
+    result.metrics = {
+        searchResult.success ? 1.0F : 0.0F,
+        score,
+        length,
+        static_cast<float>(bends),
+        static_cast<float>(vias),
+        static_cast<float>(violations),
+        runtimeMs,
+    };
+
+    result.padCount = static_cast<int>(result.pads.size() / 4);
+    result.routePointCount = static_cast<int>(result.routePoints.size() / 2);
+    result.obstacleCount = static_cast<int>(result.obstacles.size() / 4);
+    result.expandedObstacleCount =
+        static_cast<int>(result.expandedObstacles.size() / 4);
+    result.metricCount = static_cast<int>(result.metrics.size());
+
+    return result;
+}
+
+} // namespace PCBRouter
