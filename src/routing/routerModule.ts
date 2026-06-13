@@ -1,4 +1,5 @@
 import createRouterModule from "../wasm/dist/router.js";
+import routerWasmUrl from "../wasm/dist/router.wasm?url";
 import { demoBoard } from "../demo/demoBoard";
 import type {
   DemoBoard,
@@ -57,6 +58,10 @@ export async function routeDemoBoardFromWasm(
 function getRouterModule(): ReturnType<typeof createRouterModule> {
   routerModulePromise ??= createRouterModule({
     locateFile: (path: string, _prefix: string): string => {
+      if (path.endsWith(".wasm")) {
+        return routerWasmUrl;
+      }
+
       return new URL(`../wasm/dist/${path}`, import.meta.url).href;
     },
   });
