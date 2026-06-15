@@ -189,7 +189,7 @@
   line-height: 1.45;
   text-align: left;
   opacity: 0;
-  pointer-events: auto;
+  pointer-events: none;
   user-select: text;
   cursor: text;
   transform: translateY(-4px);
@@ -202,8 +202,7 @@
 .infoButton:focus-visible .infoTooltip,
 .infoButton:focus-within .infoTooltip {
   opacity: 1;
-  transform: translateY(0);
-}
+  transform: translateY(0); pointer-events: auto; }
 .infoButton::after {
   content: "";
   position: absolute;
@@ -211,5 +210,5 @@
   top: 100%;
   width: 380px;
   max-width: calc(100vw - 48px);
-  height: 12px;
-}
+  height: 12px; pointer-events: none; }
+ .infoButton:hover::after, .infoButton:focus-visible::after, .infoButton:focus-within::after { pointer-events: auto; }
