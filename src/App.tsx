@@ -205,7 +205,26 @@ export default function App() {
   return (
     <main className="app">
       <header className="header">
-        <h1>Rectangular Obstacle Clearance Router</h1>
+        <div className="titleRow">
+          <h1>Rectangular Obstacle Clearance Router</h1>
+
+          <span
+            className="infoButton"
+            tabIndex={0}
+            aria-label="BoardRoute information"
+          >
+            i
+            <span className="infoTooltip" role="tooltip">
+              BoardRoute lets you edit a 2D routing board and see the route
+              update live. Drag the start and end points, click an obstacle to
+              select it, move or resize it, delete the selected obstacle, or use
+              Add Obstacle to place a new one. Adjust clearance or randomize the
+              board to see how the C++/WASM A* router expands obstacles and
+              finds a path around them.
+            </span>
+          </span>
+        </div>
+
         <p>
           Move the clearance slider or randomize the rectangular obstacle
           layout. The route updates live and shows when no valid path exists.

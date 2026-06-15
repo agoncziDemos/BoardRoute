@@ -142,3 +142,74 @@
 .controlsPanel button.activeButton:hover {
   background: #fff6c9;
 }
+.titleRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.infoButton {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: #071017;
+  background: #55c7ff;
+  border: 0;
+  border-radius: 999px;
+  cursor: help;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.infoButton:hover,
+.infoButton:focus-visible {
+  background: #7ad6ff;
+}
+
+.infoTooltip {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 10px);
+  left: 0;
+  width: 380px;
+  max-width: calc(100vw - 48px);
+  padding: 12px 14px;
+  color: #dce8f2;
+  background: #0b0f13;
+  border: 1px solid #364551;
+  border-radius: 12px;
+  box-shadow: 0 14px 32px rgb(0 0 0 / 32%);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.45;
+  text-align: left;
+  opacity: 0;
+  pointer-events: auto;
+  user-select: text;
+  cursor: text;
+  transform: translateY(-4px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.infoButton:hover .infoTooltip,
+.infoButton:focus-visible .infoTooltip,
+.infoButton:focus-within .infoTooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+.infoButton::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 100%;
+  width: 380px;
+  max-width: calc(100vw - 48px);
+  height: 12px;
+}
