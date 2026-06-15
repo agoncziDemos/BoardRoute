@@ -1,4 +1,6 @@
-# BoardRoute
+﻿# BoardRoute
+
+Live demo: [BoardRoute](https://agonczidemos.github.io/BoardRoute/)
 
 BoardRoute is a browser-based demo for interactive obstacle-aware routing. It generates a simple 2D board, places rectangular obstacles, routes between two pads, and updates the route live as the user changes clearance or edits the board.
 
